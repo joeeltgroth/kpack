@@ -2,6 +2,7 @@ package buildpod
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/buildpacks/lifecycle"
@@ -58,6 +59,14 @@ func (g *Generator) Generate(build BuildPodable) (*v1.Pod, error) {
 	buildPodBuilderConfig, err := g.fetchBuilderConfig(build)
 	if err != nil {
 		return nil, err
+	}
+
+	if buildPodBuilderConfig.OS == "windows" {
+		taints, err := g.calculateHomogenousWindowsNodeTaints()
+		if err != nil {
+			return nil, err
+		}
+		buildPodBuilderConfig.NodeTaints = taints
 	}
 
 	return build.BuildPod(g.BuildPodConfig, secrets, buildPodBuilderConfig)
@@ -166,4 +175,50 @@ func parseCNBID(image ggcrv1.Image, env string) (int64, error) {
 		return 0, err
 	}
 	return strconv.ParseInt(v, 10, 64)
+}
+
+func (g *Generator) calculateHomogenousWindowsNodeTaints() ([]v1.Taint, error) {
+	windowsNodes, err := g.K8sClient.CoreV1().Nodes().List(metav1.ListOptions{LabelSelector: "kubernetes.io/os=windows"})
+	if err != nil {
+		return nil, err
+	}
+
+	nodeList := windowsNodes.Items
+	if len(nodeList) == 0 {
+		return []v1.Taint{}, nil
+	}
+
+	taints := nodeList[0].Spec.Taints
+	sort.Slice(taints, func(i, j int) bool {
+		return taints[i].Key < taints[j].Key
+	})
+
+	for _, node := range nodeList[1:] {
+		taintsToCompare := node.Spec.Taints
+		sort.Slice(taintsToCompare, func(i, j int) bool {
+			return taintsToCompare[i].Key < taintsToCompare[j].Key
+		})
+
+		if !taintsEqual(taints, taintsToCompare) {
+			return []v1.Taint{}, nil
+		}
+	}
+
+	return taints, nil
+}
+
+func taintsEqual(taint1, taint2 []v1.Taint) bool {
+	if len(taint1) != len(taint2) {
+		return false
+	}
+
+	for i := range taint2 {
+		if (taint1[i].Key != taint2[i].Key) ||
+			(taint1[i].Value != taint2[i].Value) ||
+			(taint1[i].Effect != taint2[i].Effect) {
+			return false
+		}
+	}
+
+	return true
 }
